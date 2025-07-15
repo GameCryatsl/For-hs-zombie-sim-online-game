@@ -1,0 +1,508 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <title>좀비 태그</title>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        background: #222;
+      }
+      canvas {
+        background: #111;
+        display: block;
+        margin: 0 auto;
+      }
+      #info {
+        color: #eee;
+        font-family: monospace;
+        text-align: center;
+        margin-top: 10px;
+        user-select: none;
+      }
+      #restartBtn {
+        display: none;
+        margin: 10px auto;
+        padding: 10px 20px;
+        font-size: 18px;
+        cursor: pointer;
+        background: #444;
+        color: white;
+        border: none;
+        border-radius: 5px;
+      }
+      #restartBtn:hover {
+        background: #666;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="game" width="800" height="600"></canvas>
+    <div id="info">
+      WASD 이동 | 마우스 클릭 총 쏘기 (탄환: 10) | E 키 지뢰 설치 (최대 3개) |
+      점수: 0
+    </div>
+    <button id="restartBtn">재시작</button>
+
+    <script>
+      const canvas = document.getElementById("game");
+      const ctx = canvas.getContext("2d");
+
+      // 초기 게임 상태 변수들
+      const player = { x: 100, y: 100, size: 20, speed: 2, score: 0 }; // player.speed 3으로 설정
+      const zombies = [{ x: 700, y: 500, size: 20, speed: 1 }]; // zombie.speed 2로 설정
+      const items = [];
+      const bullets = [];
+      const mines = [];
+      const explosions = [];
+
+      let keys = {};
+      let infected = false;
+
+      let maxScore = 0;
+      let mineCount = 1;
+      let bulletCount = 10;
+      const maxBullets = 10;
+      const bulletRechargeTime = 1200; // 5초마다 1발 충전
+      let lastBulletRecharge = 0;
+
+      let zombieSpawnInterval = 1000; // 2초마다 좀비 한 마리 추가
+      let lastZombieSpawn = 0;
+
+      let itemSpawnInterval = 8000; // 8초마다 아이템 생성
+      let lastItemSpawn = 0;
+
+      const restartBtn = document.getElementById("restartBtn");
+      restartBtn.onclick = restartGame;
+
+      // 키다운 이벤트 리스너
+      window.addEventListener("keydown", (e) => {
+        keys[e.key.toLowerCase()] = true;
+        // 지뢰 설치
+        if (e.key.toLowerCase() === "e" && !infected) {
+          placeMine();
+        }
+        // 'R' 키로 게임 재시작 (게임 오버 상태에서만 작동)
+        if (e.key.toLowerCase() === "r" && infected) {
+          restartGame();
+        }
+      });
+      // 키업 이벤트 리스너
+      window.addEventListener(
+        "keyup",
+        (e) => (keys[e.key.toLowerCase()] = false),
+      );
+
+      // 캔버스 클릭 이벤트 리스너: 총 쏘기
+      canvas.addEventListener("click", (e) => {
+        if (infected) return; // 감염 상태면 총 못 쏨
+        if (bulletCount <= 0) {
+          showMessage("총알이 없습니다!");
+          return;
+        }
+        const rect = canvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+        shootBullet(mx, my);
+        bulletCount--;
+      });
+
+      // 두 객체 간의 거리 계산 함수
+      function distance(a, b) {
+        return Math.hypot(a.x - b.x, a.y - b.y);
+      }
+
+      // 플레이어 이동 함수
+      function movePlayer() {
+        if (keys["w"]) player.y -= player.speed;
+        if (keys["s"]) player.y += player.speed;
+        if (keys["a"]) player.x -= player.speed;
+        if (keys["d"]) player.x += player.speed;
+
+        // 화면 경계 밖으로 나가지 않도록 제한
+        player.x = Math.max(
+          player.size / 2,
+          Math.min(canvas.width - player.size / 2, player.x),
+        );
+        player.y = Math.max(
+          player.size / 2,
+          Math.min(canvas.height - player.size / 2, player.y),
+        );
+      }
+
+      // 좀비 이동 함수 (플레이어를 쫓아감)
+      function moveZombie(zombie) {
+        const dx = player.x - zombie.x;
+        const dy = player.y - zombie.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist > 0) {
+          zombie.x += (dx / dist) * zombie.speed;
+          zombie.y += (dy / dist) * zombie.speed;
+        }
+      }
+
+      // 총알 발사 함수
+      function shootBullet(targetX, targetY) {
+        const speed = 7;
+        const dx = targetX - player.x;
+        const dy = targetY - player.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist === 0) return;
+
+        bullets.push({
+          x: player.x,
+          y: player.y,
+          size: 5,
+          speedX: (dx / dist) * speed,
+          speedY: (dy / dist) * speed,
+        });
+      }
+
+      // 총알 업데이트 함수 (이동 및 좀비 충돌 처리)
+      function updateBullets() {
+        for (let i = bullets.length - 1; i >= 0; i--) {
+          const b = bullets[i];
+          b.x += b.speedX;
+          b.y += b.speedY;
+
+          // 화면 밖으로 나간 총알 제거
+          if (b.x < 0 || b.x > canvas.width || b.y < 0 || b.y > canvas.height) {
+            bullets.splice(i, 1);
+            continue;
+          }
+
+          // 좀비와 총알 충돌 처리 (사각형 충돌 판정을 위해 좀 더 정확한 거리 계산 필요)
+          // 현재는 원형 충돌 판정 사용 (distance 함수는 두 원의 중심 거리 계산)
+          for (let j = zombies.length - 1; j >= 0; j--) {
+            if (distance(b, zombies[j]) < (b.size + zombies[j].size) / 2) {
+              zombies.splice(j, 1); // 좀비 제거
+              bullets.splice(i, 1); // 총알 제거
+              player.score += 5; // 점수 획득
+              showMessage("+5 점수! 좀비 처치");
+              break; // 다음 총알로 넘어감
+            }
+          }
+        }
+      }
+
+      // 지뢰 설치 함수
+      function placeMine() {
+        // 지뢰는 최대 1개까지 설치 가능 (코드에 명시된 대로)
+        if (infected) return; // 감염 상태면 총 못 쏨
+        if (mineCount <= 0) {
+          showMessage("지뢰가 없습니다!");
+          return;
+        }
+        mines.push({ x: player.x, y: player.y, size: 30, countdown: 300 }); // 지뢰 크기 30, 3초 후 폭발 (60프레임 * 3초 = 180;
+        showMessage("지뢰 설치!");
+        mineCount--;
+      }
+
+      // 지뢰 업데이트 함수 (카운트다운 및 폭발 처리)
+      function updateMines() {
+        for (let i = mines.length - 1; i >= 0; i--) {
+          const mine = mines[i];
+          mine.countdown--;
+
+          if (mine.countdown <= 0) {
+            explodeMine(mine); // 카운트다운 끝나면 폭발
+            mines.splice(i, 1); // 지뢰 제거
+          }
+        }
+      }
+
+      // 지뢰 폭발 함수
+      function explodeMine(mine) {
+        const explosionRadius = 80; // 폭발 반경
+        showMessage("지뢰 폭발!");
+
+        // 폭발 범위 내 좀비 제거
+        for (let i = zombies.length - 1; i >= 0; i--) {
+          if (distance(mine, zombies[i]) <= explosionRadius) {
+            zombies.splice(i, 1);
+          }
+        }
+
+        // 폭발 효과 추가
+        explosions.push({
+          x: mine.x,
+          y: mine.y,
+          radius: 0, // 초기 반경 0
+          maxRadius: explosionRadius, // 최대 반경
+          alpha: 1, // 초기 투명도 1
+        });
+      }
+
+      // 폭발 효과 업데이트 함수
+      function updateExplosions() {
+        for (let i = explosions.length - 1; i >= 0; i--) {
+          const e = explosions[i];
+          e.radius += 2; // 반경 증가
+          e.alpha -= 0.02; // 투명도 감소 (더 부드러운 사라짐)
+          if (e.alpha <= 0) explosions.splice(i, 1); // 완전히 투명해지면 제거
+        }
+      }
+
+      // 좀비 생성 함수
+      function spawnZombie() {
+        let x, y;
+        do {
+          x = Math.random() * (canvas.width - 40) + 20;
+          y = Math.random() * (canvas.height - 40) + 20;
+          // 플레이어 근처에 좀비가 생성되지 않도록 함
+        } while (distance({ x, y }, player) < 300);
+
+        // 좀비 속도는 초기 speed 2에 0~1 사이의 랜덤 값 추가 (최대 3)
+        zombies.push({ x, y, size: 20, speed: 1 + Math.random() });
+      }
+
+      // 좀비 간 겹침 방지 함수
+      function separateZombies() {
+        for (let i = 0; i < zombies.length; i++) {
+          for (let j = i + 1; j < zombies.length; j++) {
+            const z1 = zombies[i];
+            const z2 = zombies[j];
+            const dist = distance(z1, z2);
+            const minDist = (z1.size + z2.size) / 2; // 두 좀비 반지름 합
+            if (dist < minDist && dist > 0) {
+              // 겹침이 발생하면 서로 밀어냄
+              const overlap = minDist - dist;
+              const dx = (z1.x - z2.x) / dist;
+              const dy = (z1.y - z2.y) / dist;
+
+              z1.x += dx * (overlap / 2);
+              z1.y += dy * (overlap / 2);
+              z2.x -= dx * (overlap / 2);
+              z2.y -= dy * (overlap / 2);
+
+              // 경계 밖으로 나가지 않도록 제한 (좀비가 맵 밖으로 밀려나는 것 방지)
+              z1.x = Math.min(
+                canvas.width - z1.size / 2,
+                Math.max(z1.size / 2, z1.x),
+              );
+              z1.y = Math.min(
+                canvas.height - z1.size / 2,
+                Math.max(z1.size / 2, z1.y),
+              );
+              z2.x = Math.min(
+                canvas.width - z2.size / 2,
+                Math.max(z2.size / 2, z2.x),
+              );
+              z2.y = Math.min(
+                canvas.height - z2.size / 2,
+                Math.max(z2.size / 2, z2.y),
+              );
+            }
+          }
+        }
+      }
+
+      // 아이템 생성 함수
+      function spawnItem() {
+        const types = ["speed", "score"]; // 아이템 종류
+        const type = types[Math.floor(Math.random() * types.length)];
+        const x = Math.random() * (canvas.width - 30) + 15;
+        const y = Math.random() * (canvas.height - 30) + 15;
+        items.push({ x, y, size: 15, type });
+      }
+
+      // 아이템 획득 함수
+      function collectItem(index) {
+        const item = items[index];
+        if (item.type === "speed") {
+          player.speed += 1; // 속도 증가
+          showMessage("속도 증가! 5초간 유지");
+          setTimeout(() => {
+            player.speed -= 1; // 5초 후 속도 원상 복구
+            showMessage("속도 원래대로 돌아왔어요!");
+          }, 5000);
+        } else if (item.type === "score") {
+          player.score += 10; // 점수 획득
+          showMessage("+10 점수 획득!");
+          if (mineCount < 1) {
+            mineCount++;
+          }
+        }
+        items.splice(index, 1); // 아이템 제거
+      }
+
+      // 메시지 표시 함수 (화면 상단 정보창 업데이트)
+      function showMessage(text) {
+        const info = document.getElementById("info");
+        // 현재 게임 상태를 반영하여 메시지 업데이트
+        info.textContent = `${text} | 총알: ${bulletCount}/${maxBullets} | 지뢰: ${mineCount}/1 | 점수: ${player.score} | 최고 점수: ${maxScore}`;
+        clearTimeout(showMessage.timeout); // 이전 타이머 초기화
+        showMessage.timeout = setTimeout(() => {
+          if (infected) {
+            info.textContent =
+              "감염되었습니다! 게임 종료. 점수: " + player.score;
+          } else {
+            // 기본 정보 메시지로 복구
+            info.textContent = `WASD 이동 | 마우스 클릭 총 쏘기 (탄환: ${bulletCount}/${maxBullets}) | E 키 지뢰 설치 (최대 1개) | 점수: ${player.score} | 최고 점수: ${maxScore}`;
+          }
+        }, 3000); // 3초 후 메시지 초기화
+      }
+
+      // 게임 상태 업데이트 함수 (모든 게임 로직 처리)
+      function update() {
+        if (infected) return; // 감염 상태면 업데이트 중지
+
+        separateZombies(); // 좀비 겹침 방지
+        movePlayer(); // 플레이어 이동
+        zombies.forEach(moveZombie); // 좀비 이동
+        updateBullets(); // 총알 업데이트
+        updateMines(); // 지뢰 업데이트
+        updateExplosions(); // 폭발 효과 업데이트
+
+        // 좀비 감염 체크
+        for (const zombie of zombies) {
+          // 플레이어와 좀비의 사각형 충돌 판정 (간단화된 방식)
+          // 실제 사각형 충돌은 더 복잡하지만, 여기서는 중심점 거리와 크기를 이용
+          if (distance(player, zombie) < (player.size + zombie.size) / 2) {
+            infected = true; // 감염!
+            document.getElementById("info").textContent =
+              "감염되었습니다! 게임 종료. 점수: " + player.score;
+            restartBtn.style.display = "inline-block"; // 재시작 버튼 표시
+            return; // 게임 루프 중지
+          }
+        }
+
+        // 아이템 획득 체크
+        for (let i = items.length - 1; i >= 0; i--) {
+          if (distance(player, items[i]) < (player.size + items[i].size) / 2) {
+            collectItem(i);
+          }
+        }
+
+        // 시간에 따른 좀비 추가
+        if (Date.now() - lastZombieSpawn > zombieSpawnInterval) {
+          spawnZombie();
+          lastZombieSpawn = Date.now();
+        }
+
+        // 시간에 따른 아이템 생성
+        if (Date.now() - lastItemSpawn > itemSpawnInterval) {
+          spawnItem();
+          lastItemSpawn = Date.now();
+        }
+
+        // 총알 충전
+        if (
+          bulletCount < maxBullets &&
+          Date.now() - lastBulletRecharge > bulletRechargeTime
+        ) {
+          bulletCount++;
+          lastBulletRecharge = Date.now();
+          showMessage("총알 1발 충전!");
+        }
+      }
+
+      // === 그리기 함수들 (새로운 버전) ===
+
+      // 모든 엔티티(플레이어, 좀비)를 사각형으로 그리는 범용 함수
+      function drawEntity(entity, color) {
+        ctx.fillStyle = color;
+        // 중심점을 기준으로 사각형 그리기
+        ctx.fillRect(
+          entity.x - entity.size / 2,
+          entity.y - entity.size / 2,
+          entity.size,
+          entity.size,
+        );
+      }
+
+      // 지뢰를 그리는 함수 (원형 + 카운트다운 텍스트)
+      function drawMine(mine) {
+        ctx.fillStyle = "orange";
+        ctx.beginPath();
+        ctx.arc(mine.x, mine.y, mine.size / 2, 0, Math.PI * 2); // 원형 지뢰
+        ctx.fill();
+
+        ctx.fillStyle = "black";
+        ctx.font = "12px monospace";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle"; // 텍스트 중앙 정렬
+        ctx.fillText(Math.ceil(mine.countdown / 60), mine.x, mine.y + 4);
+      }
+
+      // 폭발 효과를 그리는 함수 (오렌지색 원형)
+      function drawExplosion(e) {
+        ctx.beginPath();
+        ctx.arc(e.x, e.y, e.radius, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255,165,0,${e.alpha})`; // 오렌지색
+        ctx.fill();
+      }
+
+      // 전체 게임 그리기 함수 (새로운 버전)
+      function draw() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height); // 화면 지우기
+
+        // 플레이어 그리기 (감염 여부에 따라 색상 변경)
+        drawEntity(player, infected ? "purple" : "lime");
+        // 좀비 그리기 (모두 빨간색)
+        zombies.forEach((z) => drawEntity(z, "red"));
+
+        // 아이템 그리기 (타입에 따라 색상 변경)
+        items.forEach((item) => {
+          ctx.fillStyle = item.type === "speed" ? "cyan" : "yellow"; // 속도: 시안, 점수: 노랑
+          ctx.beginPath();
+          ctx.arc(item.x, item.y, item.size / 2, 0, Math.PI * 2); // 아이템은 원형
+          ctx.fill();
+        });
+
+        // 총알 그리기 (흰색)
+        bullets.forEach((b) => {
+          ctx.fillStyle = "white";
+          ctx.beginPath();
+          ctx.arc(b.x, b.y, b.size, 0, Math.PI * 2); // 총알은 원형
+          ctx.fill();
+        });
+
+        // 지뢰 그리기
+        mines.forEach(drawMine);
+        // 폭발 효과 그리기
+        explosions.forEach(drawExplosion);
+      }
+
+      // 게임 재시작 함수 (새로운 버전)
+      function restartGame() {
+        if (player.score > maxScore) {
+          maxScore = player.score;
+        }
+        player.x = 100;
+        player.y = 100;
+        player.score = 0;
+        player.speed = 3; // 플레이어 속도 초기화 (3)
+        zombies.length = 0;
+        zombies.push({ x: 700, y: 500, size: 20, speed: 2 }); // 좀비 초기 속도 (2)
+        items.length = 0;
+        bullets.length = 0;
+        mines.length = 0;
+        explosions.length = 0;
+        infected = false;
+        bulletCount = maxBullets; // 총알 최대치로 초기화
+        lastBulletRecharge = Date.now(); // 총알 충전 타이머 초기화
+        lastZombieSpawn = Date.now(); // 좀비 생성 타이머 초기화
+        lastItemSpawn = Date.now(); // 아이템 생성 타이머 초기화
+        restartBtn.style.display = "none"; // 재시작 버튼 숨김
+        showMessage("게임 시작! 행운을 빕니다!");
+        gameLoop(); // 게임 루프 다시 시작
+      }
+
+      // 메인 게임 루프 (새로운 버전)
+      function gameLoop() {
+        update(); // 게임 상태 업데이트
+        draw(); // 화면 그리기
+        if (!infected) {
+          // 감염되지 않았을 때만 다음 프레임 요청
+          requestAnimationFrame(gameLoop);
+        }
+      }
+
+      // 게임 시작
+      restartGame(); // 초기 게임 시작 시 모든 상태 초기화
+      // gameLoop()는 restartGame() 내부에서 호출됨
+    </script>
+  </body>
+</html>
